@@ -3,6 +3,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
+import { GammaCorrectionShader } from 'three/examples/jsm/shaders/GammaCorrectionShader.js';
 
 type TimeIdx = 0 | 1 | 2 | 3;
 type HotspotKey = 'marina' | 'lighthouse' | 'promenade' | 'grove';
@@ -83,7 +88,7 @@ const easeInOut = (x: number) => (x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x 
 // instead of snapping between four fixed states.
 const TAU = Math.PI * 2;
 const DAY_STOPS = [0.3, 0.52, 0.76, 0.95]; // Morning, Afternoon, Evening, Night
-const AUTO_DAY_SPEED = 1 / 120; // full cycle ≈ 60s when auto-cycling
+const AUTO_DAY_SPEED = 1 / 30; // full cycle ≈ 60s when auto-cycling
 
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 const col = (h: string) => new THREE.Color(h);
@@ -212,7 +217,7 @@ export default function Tideline() {
     renderer.setSize(W, H);
     renderer.outputEncoding = THREE.sRGBEncoding;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.08;
+    renderer.toneMappingExposure = 1.14; // golden-hour target (handover §1/§9)
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     mount.appendChild(renderer.domElement);
@@ -234,6 +239,24 @@ export default function Tideline() {
     controls.maxPolarAngle = 1.18;
     controls.enablePan = false;
     controls.enabled = false; // locked during the top-down intro
+
+    // ---- post-processing: bloom (handover §1, the biggest single lever) ----
+    // NOTE: THREE r128 here. There is no OutputPass and no outputColorSpace in
+    // this revision, so the chain is RenderPass → UnrealBloomPass → an explicit
+    // sRGB gamma pass. RenderPass tone-maps the scene into a *linear* composer
+    // target (tone mapping still applies once, via renderer.toneMapping); the
+    // final GammaCorrectionShader converts linear→sRGB for the screen. Without
+    // it the image renders gamma-dark; OutputPass would do this in newer THREE.
+    // Threshold is kept high / strength modest so only genuinely bright things
+    // (lamps, lighthouse lamp, the sun glow, sun-kissed water) bloom — not the
+    // whole frame — preserving the low-poly look.
+    const composer = new EffectComposer(renderer);
+    composer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    composer.setSize(W, H);
+    composer.addPass(new RenderPass(scene, camera));
+    const bloomPass = new UnrealBloomPass(new THREE.Vector2(W, H), 0.5, 0.55, 0.85);
+    composer.addPass(bloomPass);
+    composer.addPass(new ShaderPass(GammaCorrectionShader));
 
     const cur: DayState = {
       sky0: new THREE.Color(), sky1: new THREE.Color(), fog: new THREE.Color(), water: new THREE.Color(),
@@ -352,6 +375,99 @@ export default function Tideline() {
     world.add(water);
     const waterBase = (waterGeo.attributes.position.array as Float32Array).slice();
 
+    // ---- distant ocean + inland mountains (decorative, non-interactive) ----
+    // The park lives on a square slab; on its own that block looks like it is
+    // floating in empty space. A big sea plane opens the world out to the fog
+    // horizon in every direction, while a mountain range rises only on the
+    // *inland* side (behind the buildings) — the coast (+Z, toward the camera)
+    // stays open water, like a real headland where the land climbs inland and
+    // the sea opens out front. None of this is reachable: OrbitControls clamps
+    // the camera well inside it (maxDistance 120 vs. mountains at 195+), so the
+    // focus stays on the park and this is purely for depth/aesthetics.
+    //
+    // The sea sits at y=0.22, just under the central water's wave troughs
+    // (0.62 mean − 0.32 amplitude ≈ 0.30), so the two surfaces never z-fight; the
+    // small drop at the slab edge reads as shallows giving way to deeper water,
+    // which also tucks the slab's vertical walls below the surface.
+    const seaMat = new THREE.MeshStandardMaterial({ color: cur.water.clone().multiplyScalar(0.82), roughness: 0.5, metalness: 0.18 });
+    const sea = new THREE.Mesh(new THREE.PlaneGeometry(900, 900), seaMat);
+    sea.rotation.x = -Math.PI / 2;
+    sea.position.y = 0.22;
+    scene.add(sea);
+
+    // Warm stone tone; the day/night fog tints it (tan at dusk, cool by day).
+    const hillMat = new THREE.MeshStandardMaterial({ color: 0x8c8378, roughness: 1, flatShading: true });
+    const backdrop = new THREE.Group();
+    // Azimuth math: position = (cos a, sin a) * radius, so sin a = +1 (a = π/2)
+    // points at the open coast / camera. Leave that front arc clear and pack a
+    // tall, chunky range across the rest — the inland horizon and a little onto
+    // the left/right flanks.
+    const COAST = Math.PI / 2;   // azimuth of the open sea (toward the camera)
+    const GAP = 1.4;             // half-width of the clear coastal opening (rad)
+    const SPAN = TAU - 2 * GAP;  // the inland arc the mountains fill
+    const HILLS = 90;
+    for (let i = 0; i < HILLS; i++) {
+      const a = COAST + GAP + Math.random() * SPAN; // anywhere on the inland arc
+      const rad = 195 + Math.random() * 95;
+      const w = 32 + Math.random() * 32;
+      const h = 52 + Math.random() * 78;
+      const hill = new THREE.Mesh(new THREE.ConeGeometry(w, h, 4 + Math.floor(Math.random() * 4), 1), hillMat);
+      hill.position.set(Math.cos(a) * rad, h / 2 - 8, Math.sin(a) * rad);
+      hill.rotation.y = Math.random() * TAU;
+      backdrop.add(hill);
+    }
+    scene.add(backdrop);
+
+    // ---- inland mainland: extend the grass back to meet the mountains ----
+    // Behind the park the world was open water right up to the range; fill that
+    // gap with a broad grassy headland so the coast reads as the tip of a larger
+    // landmass. It sits at the park's grass height (y≈1.08, just under the park's
+    // 1.1 so they never z-fight where they overlap) and tucks under the park's
+    // back edge; its seaward flanks get the same sandy shore as the park.
+    const mShape = new THREE.Shape();
+    mShape.moveTo(-150, 26);
+    mShape.lineTo(150, 26);                                // front — hidden behind the park
+    mShape.bezierCurveTo(205, 60, 232, 120, 185, 205);    // right shore sweeping inland
+    mShape.bezierCurveTo(120, 235, 40, 205, -12, 222);    // wavy inland edge (under the hills)
+    mShape.bezierCurveTo(-72, 236, -140, 236, -185, 205);
+    mShape.bezierCurveTo(-232, 120, -205, 60, -150, 26);  // left shore back to the front
+    const mainGeo = new THREE.ExtrudeGeometry(mShape, { depth: 2, bevelEnabled: false, steps: 1 });
+    mainGeo.rotateX(-Math.PI / 2);
+    mainGeo.computeBoundingBox();
+    mainGeo.translate(0, 1.08 - mainGeo.boundingBox!.max.y, 0);
+    mainGeo.computeVertexNormals();
+    const mainland = new THREE.Mesh(mainGeo, [grassMat, sandMat]);
+    mainland.receiveShadow = true;
+    world.add(mainland);
+
+    // Point-in-polygon test against the mainland outline (same convention as
+    // inLand: world z maps to shape y via z → −z). Used to seed the forest.
+    const mPts = mShape.getPoints(120);
+    const inMain = (x: number, wz: number) => {
+      const z = -wz;
+      let inside = false;
+      for (let i = 0, j = mPts.length - 1; i < mPts.length; j = i++) {
+        const xi = mPts[i].x, zi = mPts[i].y, xj = mPts[j].x, zj = mPts[j].y;
+        if (((zi > z) !== (zj > z)) && (x < ((xj - xi) * (z - zi)) / (zj - zi) + xi)) inside = !inside;
+      }
+      return inside;
+    };
+
+    // Rolling grassy foothills bridging the flat plain into the rocky range.
+    const moundMat = new THREE.MeshStandardMaterial({ color: 0x6f854c, roughness: 1, flatShading: true });
+    for (let i = 0; i < 18; i++) {
+      const a = COAST + GAP + Math.random() * SPAN;
+      const rad = 120 + Math.random() * 65;
+      const w = 22 + Math.random() * 32;
+      const h = 7 + Math.random() * 16;
+      const mound = new THREE.Mesh(new THREE.IcosahedronGeometry(1, 0), moundMat);
+      mound.position.set(Math.cos(a) * rad, 1.0, Math.sin(a) * rad);
+      mound.scale.set(w, h, w);
+      mound.rotation.y = Math.random() * TAU;
+      mound.receiveShadow = true;
+      world.add(mound);
+    }
+
     // ---- trees (instanced) ----
     const dummy = new THREE.Object3D();
     const treeSpots: Array<[number, number, number]> = [];
@@ -363,6 +479,13 @@ export default function Tideline() {
         if (inLand(x, z)) treeSpots.push([x, z, 0.8 + Math.random() * 0.7]);
       }
     });
+    // Inland forest: scatter trees across the new headland's flat plain, in
+    // front of the foothills (radius ≲ 120). Skip the park footprint itself.
+    for (let i = 0; i < 480; i++) {
+      const x = (Math.random() * 2 - 1) * 175;
+      const z = -(34 + Math.random() * 86);
+      if (inMain(x, z) && !inLand(x, z)) treeSpots.push([x, z, 0.85 + Math.random() * 0.95]);
+    }
     const N = treeSpots.length;
     const trunkMat = new THREE.MeshStandardMaterial({ color: 0x6e4f37, roughness: 1, flatShading: true });
     const folA = new THREE.MeshStandardMaterial({ color: 0x4f7a3f, roughness: 0.95, flatShading: true });
@@ -618,6 +741,7 @@ export default function Tideline() {
       root.style.background = 'linear-gradient(180deg,' + cur.sky0.getStyle() + ' 0%,' + cur.sky1.getStyle() + ' 76%)';
       hemi.color.copy(cur.hemiSky); hemi.groundColor.copy(cur.hemiGround); hemi.intensity = cur.hemiI;
       scene.fog!.color.copy(cur.fog); waterMat.color.copy(cur.water);
+      seaMat.color.copy(cur.water).multiplyScalar(0.82); // deeper offshore water tracks the palette
       lampMats.forEach((m) => (m.emissiveIntensity = cur.lamps * 1.4));
       windowMats.forEach((m) => (m.emissiveIntensity = cur.lamps * 1.1));
       glowSprites.forEach((m) => (m.opacity = cur.lamps * 0.9));
@@ -646,7 +770,7 @@ export default function Tideline() {
       }
 
       controls.update();
-      renderer.render(scene, camera);
+      composer.render();
 
       // project hotspots
       const cw = mount.clientWidth, ch = mount.clientHeight;
@@ -677,6 +801,7 @@ export default function Tideline() {
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
       renderer.setSize(w, h);
+      composer.setSize(w, h);
     };
     window.addEventListener('resize', onResize);
 
@@ -685,6 +810,8 @@ export default function Tideline() {
       cancelAnimationFrame(raf);
       window.removeEventListener('resize', onResize);
       controls.dispose();
+      composer.renderTarget1.dispose();
+      composer.renderTarget2.dispose();
       renderer.dispose();
       if (renderer.domElement.parentNode) {
         renderer.domElement.parentNode.removeChild(renderer.domElement);
