@@ -3,6 +3,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
+import { GammaCorrectionShader } from 'three/examples/jsm/shaders/GammaCorrectionShader.js';
 
 type TimeIdx = 0 | 1 | 2 | 3;
 type HotspotKey = 'marina' | 'lighthouse' | 'promenade' | 'grove';
@@ -83,7 +88,7 @@ const easeInOut = (x: number) => (x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x 
 // instead of snapping between four fixed states.
 const TAU = Math.PI * 2;
 const DAY_STOPS = [0.3, 0.52, 0.76, 0.95]; // Morning, Afternoon, Evening, Night
-const AUTO_DAY_SPEED = 1 / 120; // full cycle ≈ 60s when auto-cycling
+const AUTO_DAY_SPEED = 1 / 30; // full cycle ≈ 60s when auto-cycling
 
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 const col = (h: string) => new THREE.Color(h);
@@ -212,7 +217,7 @@ export default function Tideline() {
     renderer.setSize(W, H);
     renderer.outputEncoding = THREE.sRGBEncoding;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.08;
+    renderer.toneMappingExposure = 1.14; // golden-hour target (handover §1/§9)
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     mount.appendChild(renderer.domElement);
@@ -234,6 +239,24 @@ export default function Tideline() {
     controls.maxPolarAngle = 1.18;
     controls.enablePan = false;
     controls.enabled = false; // locked during the top-down intro
+
+    // ---- post-processing: bloom (handover §1, the biggest single lever) ----
+    // NOTE: THREE r128 here. There is no OutputPass and no outputColorSpace in
+    // this revision, so the chain is RenderPass → UnrealBloomPass → an explicit
+    // sRGB gamma pass. RenderPass tone-maps the scene into a *linear* composer
+    // target (tone mapping still applies once, via renderer.toneMapping); the
+    // final GammaCorrectionShader converts linear→sRGB for the screen. Without
+    // it the image renders gamma-dark; OutputPass would do this in newer THREE.
+    // Threshold is kept high / strength modest so only genuinely bright things
+    // (lamps, lighthouse lamp, the sun glow, sun-kissed water) bloom — not the
+    // whole frame — preserving the low-poly look.
+    const composer = new EffectComposer(renderer);
+    composer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    composer.setSize(W, H);
+    composer.addPass(new RenderPass(scene, camera));
+    const bloomPass = new UnrealBloomPass(new THREE.Vector2(W, H), 0.5, 0.55, 0.85);
+    composer.addPass(bloomPass);
+    composer.addPass(new ShaderPass(GammaCorrectionShader));
 
     const cur: DayState = {
       sky0: new THREE.Color(), sky1: new THREE.Color(), fog: new THREE.Color(), water: new THREE.Color(),
@@ -352,6 +375,182 @@ export default function Tideline() {
     world.add(water);
     const waterBase = (waterGeo.attributes.position.array as Float32Array).slice();
 
+    // Depth-graded water + shoreline foam (handover §5), r128-friendly: instead of
+    // a depth pre-pass we bake each water vertex's distance to the park shoreline
+    // once, then drive the colour (shallow→deep tint + an animated foam band at
+    // the shore) per-frame from inside the wave loop below. The material's albedo
+    // is the vertex colour, so the day/night water tint is mixed in there too.
+    const waterShoreDist = new Float32Array(waterGeo.attributes.position.count);
+    {
+      const shoreW = shape.getPoints(120).map((p) => new THREE.Vector2(p.x, -p.y)); // shoreline in world XZ
+      for (let i = 0; i < waterGeo.attributes.position.count; i++) {
+        const wx = waterBase[i * 3], wz = -waterBase[i * 3 + 1];
+        let md = Infinity;
+        for (let k = 0; k < shoreW.length; k++) {
+          const dx = shoreW[k].x - wx, dz = shoreW[k].y - wz;
+          const d = dx * dx + dz * dz;
+          if (d < md) md = d;
+        }
+        waterShoreDist[i] = Math.sqrt(md);
+      }
+    }
+    waterGeo.setAttribute('color', new THREE.Float32BufferAttribute(new Float32Array(waterGeo.attributes.position.count * 3), 3));
+    waterMat.vertexColors = true;
+    waterMat.color.set(0xffffff); // albedo comes from the per-vertex colours
+
+    // ---- distant ocean + inland mountains (decorative, non-interactive) ----
+    // The park lives on a square slab; on its own that block looks like it is
+    // floating in empty space. A big sea plane opens the world out to the fog
+    // horizon in every direction, while a mountain range rises only on the
+    // *inland* side (behind the buildings) — the coast (+Z, toward the camera)
+    // stays open water, like a real headland where the land climbs inland and
+    // the sea opens out front. None of this is reachable: OrbitControls clamps
+    // the camera well inside it (maxDistance 120 vs. mountains at 195+), so the
+    // focus stays on the park and this is purely for depth/aesthetics.
+    //
+    // The sea sits at y=0.22, just under the central water's wave troughs
+    // (0.62 mean − 0.32 amplitude ≈ 0.30), so the two surfaces never z-fight; the
+    // small drop at the slab edge reads as shallows giving way to deeper water,
+    // which also tucks the slab's vertical walls below the surface.
+    const seaMat = new THREE.MeshStandardMaterial({ color: cur.water.clone().multiplyScalar(0.82), roughness: 0.5, metalness: 0.18 });
+    const sea = new THREE.Mesh(new THREE.PlaneGeometry(900, 900), seaMat);
+    sea.rotation.x = -Math.PI / 2;
+    sea.position.y = 0.22;
+    scene.add(sea);
+
+    // Height-based snow caps (handover §6): per-vertex colors run rock→snow with
+    // a soft band so only the tall peaks whiten and there's no hard snow line.
+    // Material color stays white so the vertex colors show through; the day/night
+    // fog still tints everything (tan at dusk, cool by day).
+    const hillMat = new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, roughness: 1, flatShading: true });
+    const ROCK = new THREE.Color(0x6b6760), SNOW = new THREE.Color(0xf4f8fc);
+    const SNOW_Y = 40, SNOW_BAND = 16; // world-height snow line + soft transition width
+    const snowyCone = (w: number, h: number, seg: number, posY: number) => {
+      const g = new THREE.ConeGeometry(w, h, seg, 1);
+      const pos = g.attributes.position;
+      const cc = new Float32Array(pos.count * 3);
+      const tmp = new THREE.Color();
+      for (let i = 0; i < pos.count; i++) {
+        const wy = pos.getY(i) + posY; // this vertex's world height
+        const t = Math.max(0, Math.min(1, (wy - (SNOW_Y - SNOW_BAND)) / SNOW_BAND));
+        tmp.copy(ROCK).lerp(SNOW, t);
+        cc[i * 3] = tmp.r; cc[i * 3 + 1] = tmp.g; cc[i * 3 + 2] = tmp.b;
+      }
+      g.setAttribute('color', new THREE.Float32BufferAttribute(cc, 3));
+      return g;
+    };
+    const backdrop = new THREE.Group();
+    // Azimuth math: position = (cos a, sin a) * radius, so sin a = +1 (a = π/2)
+    // points at the open coast / camera. Leave that front arc clear and pack a
+    // tall, chunky range across the rest — the inland horizon and a little onto
+    // the left/right flanks.
+    const COAST = Math.PI / 2;   // azimuth of the open sea (toward the camera)
+    const GAP = 1.4;             // half-width of the clear coastal opening (rad)
+    const SPAN = TAU - 2 * GAP;  // the inland arc the mountains fill
+    const HILLS = 90;
+    for (let i = 0; i < HILLS; i++) {
+      const a = COAST + GAP + Math.random() * SPAN; // anywhere on the inland arc
+      const rad = 195 + Math.random() * 95;
+      const w = 32 + Math.random() * 32;
+      const h = 52 + Math.random() * 78;
+      const posY = h / 2 - 8;
+      const hill = new THREE.Mesh(snowyCone(w, h, 4 + Math.floor(Math.random() * 4), posY), hillMat);
+      hill.position.set(Math.cos(a) * rad, posY, Math.sin(a) * rad);
+      hill.rotation.y = Math.random() * TAU;
+      backdrop.add(hill);
+    }
+    scene.add(backdrop);
+
+    // ---- inland mainland: extend the grass back to meet the mountains ----
+    // Behind the park the world was open water right up to the range; fill that
+    // gap with a broad grassy headland so the coast reads as the tip of a larger
+    // landmass. It sits at the park's grass height (y≈1.08, just under the park's
+    // 1.1 so they never z-fight where they overlap) and tucks under the park's
+    // back edge; its seaward flanks get the same sandy shore as the park.
+    const mShape = new THREE.Shape();
+    mShape.moveTo(-150, 26);
+    mShape.lineTo(150, 26);                                // front — hidden behind the park
+    mShape.bezierCurveTo(205, 60, 232, 120, 185, 205);    // right shore sweeping inland
+    mShape.bezierCurveTo(120, 235, 40, 205, -12, 222);    // wavy inland edge (under the hills)
+    mShape.bezierCurveTo(-72, 236, -140, 236, -185, 205);
+    mShape.bezierCurveTo(-232, 120, -205, 60, -150, 26);  // left shore back to the front
+    const mainGeo = new THREE.ExtrudeGeometry(mShape, { depth: 2, bevelEnabled: false, steps: 1 });
+    mainGeo.rotateX(-Math.PI / 2);
+    mainGeo.computeBoundingBox();
+    mainGeo.translate(0, 1.08 - mainGeo.boundingBox!.max.y, 0);
+    mainGeo.computeVertexNormals();
+    const mainland = new THREE.Mesh(mainGeo, [grassMat, sandMat]);
+    mainland.receiveShadow = true;
+    world.add(mainland);
+
+    // Point-in-polygon test against the mainland outline (same convention as
+    // inLand: world z maps to shape y via z → −z). Used to seed the forest.
+    const mPts = mShape.getPoints(120);
+    const inMain = (x: number, wz: number) => {
+      const z = -wz;
+      let inside = false;
+      for (let i = 0, j = mPts.length - 1; i < mPts.length; j = i++) {
+        const xi = mPts[i].x, zi = mPts[i].y, xj = mPts[j].x, zj = mPts[j].y;
+        if (((zi > z) !== (zj > z)) && (x < ((xj - xi) * (z - zi)) / (zj - zi) + xi)) inside = !inside;
+      }
+      return inside;
+    };
+
+    // Rolling grassy foothills bridging the flat plain into the rocky range.
+    const moundMat = new THREE.MeshStandardMaterial({ color: 0x6f854c, roughness: 1, flatShading: true });
+    for (let i = 0; i < 18; i++) {
+      const a = COAST + GAP + Math.random() * SPAN;
+      const rad = 120 + Math.random() * 65;
+      const w = 22 + Math.random() * 32;
+      const h = 7 + Math.random() * 16;
+      const mound = new THREE.Mesh(new THREE.IcosahedronGeometry(1, 0), moundMat);
+      mound.position.set(Math.cos(a) * rad, 1.0, Math.sin(a) * rad);
+      mound.scale.set(w, h, w);
+      mound.rotation.y = Math.random() * TAU;
+      mound.receiveShadow = true;
+      world.add(mound);
+    }
+
+    // Conifer forest cloaking the foothills and lower slopes (handover §6): dark
+    // low-poly pines (trunk + two stacked cones) instanced across the inland arc
+    // below the snow line, only where the mainland exists. The three parts share
+    // one instance matrix per tree, so their pre-centred geometries stay aligned.
+    const coniferSpots: Array<[number, number, number]> = [];
+    for (let i = 0; i < 340; i++) {
+      const a = COAST + GAP * 0.8 + Math.random() * (SPAN + GAP * 0.4);
+      const rad = 100 + Math.random() * 100;
+      const x = Math.cos(a) * rad, z = Math.sin(a) * rad;
+      if (inMain(x, z)) coniferSpots.push([x, z, 1.8 + Math.random() * 2.8]);
+    }
+    const C = coniferSpots.length;
+    const pineTrunkMat = new THREE.MeshStandardMaterial({ color: 0x5a4632, roughness: 1, flatShading: true });
+    const pineMat = new THREE.MeshStandardMaterial({ color: 0x36573b, roughness: 0.95, flatShading: true });
+    const pineTrunkG = new THREE.CylinderGeometry(0.1, 0.14, 0.7, 5); pineTrunkG.translate(0, 0.35, 0);
+    const pineLowG = new THREE.ConeGeometry(0.85, 1.7, 7); pineLowG.translate(0, 1.45, 0);
+    const pineHighG = new THREE.ConeGeometry(0.55, 1.4, 7); pineHighG.translate(0, 2.3, 0);
+    const pineTrunks = new THREE.InstancedMesh(pineTrunkG, pineTrunkMat, C);
+    const pineLow = new THREE.InstancedMesh(pineLowG, pineMat, C);
+    const pineHigh = new THREE.InstancedMesh(pineHighG, pineMat, C);
+    const cd = new THREE.Object3D();
+    const pineTint = new THREE.Color();
+    coniferSpots.forEach((c, i) => {
+      const [x, z, s] = c;
+      cd.position.set(x, 1.08, z);
+      cd.scale.setScalar(s);
+      cd.rotation.set(0, Math.random() * TAU, 0);
+      cd.updateMatrix();
+      pineTrunks.setMatrixAt(i, cd.matrix);
+      pineLow.setMatrixAt(i, cd.matrix);
+      pineHigh.setMatrixAt(i, cd.matrix);
+      const v = 0.78 + Math.random() * 0.42; // darker/lighter pine variation
+      pineTint.setRGB(v * 0.95, v, v * 0.9);
+      pineLow.setColorAt(i, pineTint);
+      pineHigh.setColorAt(i, pineTint);
+    });
+    if (pineLow.instanceColor) pineLow.instanceColor.needsUpdate = true;
+    if (pineHigh.instanceColor) pineHigh.instanceColor.needsUpdate = true;
+    world.add(pineTrunks, pineLow, pineHigh);
+
     // ---- trees (instanced) ----
     const dummy = new THREE.Object3D();
     const treeSpots: Array<[number, number, number]> = [];
@@ -363,6 +562,13 @@ export default function Tideline() {
         if (inLand(x, z)) treeSpots.push([x, z, 0.8 + Math.random() * 0.7]);
       }
     });
+    // Inland forest: scatter trees across the new headland's flat plain, in
+    // front of the foothills (radius ≲ 120). Skip the park footprint itself.
+    for (let i = 0; i < 480; i++) {
+      const x = (Math.random() * 2 - 1) * 175;
+      const z = -(34 + Math.random() * 86);
+      if (inMain(x, z) && !inLand(x, z)) treeSpots.push([x, z, 0.85 + Math.random() * 0.95]);
+    }
     const N = treeSpots.length;
     const trunkMat = new THREE.MeshStandardMaterial({ color: 0x6e4f37, roughness: 1, flatShading: true });
     const folA = new THREE.MeshStandardMaterial({ color: 0x4f7a3f, roughness: 0.95, flatShading: true });
@@ -371,12 +577,22 @@ export default function Tideline() {
     const fol1 = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(0.62, 0), folA, N);
     const fol2 = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(0.46, 0), folB, N);
     trunks.castShadow = fol1.castShadow = fol2.castShadow = true;
+    // Per-instance foliage tint (handover §8) — multiplies the base green by a
+    // brightness/hue jitter (warmer-yellow ↔ cooler) so the canopy reads with
+    // depth and variation instead of two flat greens.
+    const folTint = new THREE.Color();
     treeSpots.forEach((t, i) => {
       const [x, z, s] = t;
       dummy.position.set(x, 1.1 + 0.5 * s, z); dummy.scale.set(s, s * 1.3, s); dummy.rotation.set(0, 0, 0); dummy.updateMatrix(); trunks.setMatrixAt(i, dummy.matrix);
       dummy.position.set(x, 1.1 + 1.05 * s, z); dummy.scale.set(s, s, s); dummy.rotation.set(0, Math.random() * 3, 0); dummy.updateMatrix(); fol1.setMatrixAt(i, dummy.matrix);
       dummy.position.set(x, 1.1 + 1.55 * s, z); dummy.scale.set(s, s, s); dummy.rotation.set(0, Math.random() * 3, 0); dummy.updateMatrix(); fol2.setMatrixAt(i, dummy.matrix);
+      const v = 0.8 + Math.random() * 0.4;
+      folTint.setRGB(v * (0.96 + Math.random() * 0.12), v, v * (0.88 + Math.random() * 0.08));
+      fol1.setColorAt(i, folTint);
+      fol2.setColorAt(i, folTint);
     });
+    if (fol1.instanceColor) fol1.instanceColor.needsUpdate = true;
+    if (fol2.instanceColor) fol2.instanceColor.needsUpdate = true;
     world.add(trunks, fol1, fol2);
 
     // ---- rocks / breakwater ----
@@ -395,6 +611,23 @@ export default function Tideline() {
       dummy.position.set(x, 0.55, z); dummy.scale.set(s * 1.3, s, s * 1.1); dummy.rotation.set(Math.random(), Math.random() * 3, Math.random()); dummy.updateMatrix(); rocks.setMatrixAt(i, dummy.matrix);
     });
     world.add(rocks);
+
+    // Scattered rocks along the park's coastline (handover §8): sit them at the
+    // waterline on the wavy seaward shore only (shape y < 6), half-submerged, so
+    // the foam breaks around them. Skips the inland back edge (under the mainland).
+    const shoreRockSpots: Array<[number, number, number]> = [];
+    for (const p of shape.getPoints(170)) {
+      if (p.y > 6 || Math.random() > 0.2) continue;
+      shoreRockSpots.push([p.x + (Math.random() - 0.5) * 1.6, -p.y + (Math.random() - 0.5) * 1.6, 0.32 + Math.random() * 0.6]);
+    }
+    const shoreRocks = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(1, 0), rockMat, shoreRockSpots.length);
+    shoreRocks.castShadow = true;
+    shoreRocks.receiveShadow = true;
+    shoreRockSpots.forEach((r, i) => {
+      const [x, z, s] = r;
+      dummy.position.set(x, 0.6, z); dummy.scale.set(s * 1.25, s * 0.8, s * 1.1); dummy.rotation.set(Math.random(), Math.random() * 3, Math.random()); dummy.updateMatrix(); shoreRocks.setMatrixAt(i, dummy.matrix);
+    });
+    world.add(shoreRocks);
 
     // ---- promenade path ----
     const pathMat = new THREE.MeshStandardMaterial({ color: 0xcabb98, roughness: 1 });
@@ -482,6 +715,54 @@ export default function Tideline() {
     lhLight.position.set(27, 6.2, -3);
     world.add(lhLight);
 
+    // ---- lighthouse beam (handover §7, the hero moment) ----
+    // A slim additive cone sweeps a seaward arc from the lamp, with a matching
+    // streak on the water reading as its reflection, plus a real SpotLight that
+    // actually lights the water. All three fade in with the day cycle (dark at
+    // noon, strong at dusk/night) and are carried by the bloom pass.
+    const BEAM_LEN = 44;
+    const beamGeo = new THREE.ConeGeometry(3.0, BEAM_LEN, 18, 1, true);
+    beamGeo.translate(0, -BEAM_LEN / 2, 0); // apex at the pivot (the lamp)
+    const beamColors = new Float32Array(beamGeo.attributes.position.count * 3);
+    {
+      const p = beamGeo.attributes.position.array as Float32Array;
+      for (let i = 0; i < beamGeo.attributes.position.count; i++) {
+        const t = Math.max(0, Math.min(1, 1 + p[i * 3 + 1] / BEAM_LEN)); // 1 at lamp → 0 at tip
+        beamColors[i * 3] = 1.0 * t; beamColors[i * 3 + 1] = 0.82 * t; beamColors[i * 3 + 2] = 0.5 * t;
+      }
+    }
+    beamGeo.setAttribute('color', new THREE.Float32BufferAttribute(beamColors, 3));
+    beamGeo.rotateX(-Math.PI / 2 + 0.14); // swing to horizontal (+Z), tilt down onto the water
+    const beamMat = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0, side: THREE.DoubleSide });
+    const beamPivot = new THREE.Group();
+    beamPivot.position.set(27, 6.15, -3);
+    beamPivot.add(new THREE.Mesh(beamGeo, beamMat));
+    world.add(beamPivot);
+
+    const streakGeo = new THREE.PlaneGeometry(2.6, 40, 1, 1);
+    streakGeo.rotateX(-Math.PI / 2);
+    streakGeo.translate(0, 0, 20); // runs +Z out from the lighthouse base
+    const streakColors = new Float32Array(streakGeo.attributes.position.count * 3);
+    {
+      const p = streakGeo.attributes.position.array as Float32Array;
+      for (let i = 0; i < streakGeo.attributes.position.count; i++) {
+        const t = Math.max(0, Math.min(1, 1 - p[i * 3 + 2] / 40)); // bright at base → fades seaward
+        streakColors[i * 3] = 1.0 * t; streakColors[i * 3 + 1] = 0.8 * t; streakColors[i * 3 + 2] = 0.46 * t;
+      }
+    }
+    streakGeo.setAttribute('color', new THREE.Float32BufferAttribute(streakColors, 3));
+    const streakMat = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false, opacity: 0 });
+    const streakPivot = new THREE.Group();
+    streakPivot.position.set(27, 0.66, -3);
+    streakPivot.add(new THREE.Mesh(streakGeo, streakMat));
+    world.add(streakPivot);
+
+    const lhSpot = new THREE.SpotLight(0xffd9a0, 0, 52, 0.15, 0.7, 1);
+    const lhSpotTarget = new THREE.Object3D();
+    lhSpotTarget.position.set(0, -5.5, 40); // out and down along the beam
+    beamPivot.add(lhSpot, lhSpotTarget);
+    lhSpot.target = lhSpotTarget;
+
     // ---- pavilion ----
     const pav = new THREE.Group();
     const deck = new THREE.Mesh(new THREE.CylinderGeometry(2.6, 2.6, 0.25, 8), new THREE.MeshStandardMaterial({ color: 0xb89a6e, roughness: 1 }));
@@ -557,6 +838,11 @@ export default function Tideline() {
     const tmpV = new THREE.Vector3();
     const sunVec = new THREE.Vector3();
     const moonVec = new THREE.Vector3();
+    // reusable colour scratch for the per-frame water depth/foam shading
+    const wFoam = new THREE.Color(0xffffff);
+    const wDeep = new THREE.Color();
+    const wShallow = new THREE.Color();
+    const wVert = new THREE.Color();
 
     const animate = () => {
       if (!mounted) return;
@@ -564,15 +850,27 @@ export default function Tideline() {
       const dt = Math.min(clock.getDelta(), 0.05);
       const et = clock.elapsedTime;
 
-      // water
+      // water: animate the waves, and shade depth (shallow→deep) + shoreline foam
       const pos = water.geometry.attributes.position;
       const arr = pos.array as Float32Array;
+      const wcol = (water.geometry.attributes.color.array as Float32Array);
+      wShallow.copy(cur.water).lerp(wFoam, 0.32); // bright shallows
+      wDeep.copy(cur.water).multiplyScalar(0.72);  // darker offshore
       for (let i = 0; i < pos.count; i++) {
         const ix = i * 3;
         const x = waterBase[ix], y = waterBase[ix + 1];
         arr[ix + 2] = Math.sin(x * 0.35 + et * 1.1) * 0.16 + Math.cos(y * 0.4 + et * 0.85) * 0.16;
+        const sd = waterShoreDist[i];
+        wVert.copy(wShallow).lerp(wDeep, Math.min(1, sd / 24)); // depth gradient
+        const fb = 1 - Math.min(1, sd / 3.4); // foam band hugging the shore
+        if (fb > 0.001) {
+          const shim = 0.5 + 0.5 * Math.sin(x * 0.9 - y * 0.7 + et * 2.4); // scrolling surf
+          wVert.lerp(wFoam, Math.min(1, fb * fb * (0.45 + 0.75 * shim)) * 0.95);
+        }
+        wcol[ix] = wVert.r; wcol[ix + 1] = wVert.g; wcol[ix + 2] = wVert.b;
       }
       pos.needsUpdate = true;
+      water.geometry.attributes.color.needsUpdate = true;
       water.geometry.computeVertexNormals();
 
       // moving boats
@@ -617,12 +915,20 @@ export default function Tideline() {
       // ---- apply the sampled palette ----
       root.style.background = 'linear-gradient(180deg,' + cur.sky0.getStyle() + ' 0%,' + cur.sky1.getStyle() + ' 76%)';
       hemi.color.copy(cur.hemiSky); hemi.groundColor.copy(cur.hemiGround); hemi.intensity = cur.hemiI;
-      scene.fog!.color.copy(cur.fog); waterMat.color.copy(cur.water);
+      scene.fog!.color.copy(cur.fog); // water tint now comes from per-vertex depth/foam colours
+      seaMat.color.copy(cur.water).multiplyScalar(0.82); // deeper offshore water tracks the palette
       lampMats.forEach((m) => (m.emissiveIntensity = cur.lamps * 1.4));
       windowMats.forEach((m) => (m.emissiveIntensity = cur.lamps * 1.1));
       glowSprites.forEach((m) => (m.opacity = cur.lamps * 0.9));
       starMat.opacity = cur.stars;
       lhLight.intensity = cur.lamps * 2.2;
+      // sweep the lighthouse beam across the bay and fade it with the day cycle
+      const beamSweep = 0.3 + Math.sin(et * 0.3) * 0.7;
+      beamPivot.rotation.y = beamSweep;
+      streakPivot.rotation.y = beamSweep;
+      beamMat.opacity = cur.lamps * 0.7;
+      streakMat.opacity = cur.lamps * 0.85;
+      lhSpot.intensity = cur.lamps * 2.2;
       sunSprite.position.copy(sunVec).multiplyScalar(320);
       sunSprite.material.color.copy(cur.keyCol);
       sunSprite.material.opacity = cur.sunGlow;
@@ -646,7 +952,7 @@ export default function Tideline() {
       }
 
       controls.update();
-      renderer.render(scene, camera);
+      composer.render();
 
       // project hotspots
       const cw = mount.clientWidth, ch = mount.clientHeight;
@@ -677,6 +983,7 @@ export default function Tideline() {
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
       renderer.setSize(w, h);
+      composer.setSize(w, h);
     };
     window.addEventListener('resize', onResize);
 
@@ -685,6 +992,8 @@ export default function Tideline() {
       cancelAnimationFrame(raf);
       window.removeEventListener('resize', onResize);
       controls.dispose();
+      composer.renderTarget1.dispose();
+      composer.renderTarget2.dispose();
       renderer.dispose();
       if (renderer.domElement.parentNode) {
         renderer.domElement.parentNode.removeChild(renderer.domElement);
