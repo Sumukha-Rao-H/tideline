@@ -375,6 +375,29 @@ export default function Tideline() {
     world.add(water);
     const waterBase = (waterGeo.attributes.position.array as Float32Array).slice();
 
+    // Depth-graded water + shoreline foam (handover §5), r128-friendly: instead of
+    // a depth pre-pass we bake each water vertex's distance to the park shoreline
+    // once, then drive the colour (shallow→deep tint + an animated foam band at
+    // the shore) per-frame from inside the wave loop below. The material's albedo
+    // is the vertex colour, so the day/night water tint is mixed in there too.
+    const waterShoreDist = new Float32Array(waterGeo.attributes.position.count);
+    {
+      const shoreW = shape.getPoints(120).map((p) => new THREE.Vector2(p.x, -p.y)); // shoreline in world XZ
+      for (let i = 0; i < waterGeo.attributes.position.count; i++) {
+        const wx = waterBase[i * 3], wz = -waterBase[i * 3 + 1];
+        let md = Infinity;
+        for (let k = 0; k < shoreW.length; k++) {
+          const dx = shoreW[k].x - wx, dz = shoreW[k].y - wz;
+          const d = dx * dx + dz * dz;
+          if (d < md) md = d;
+        }
+        waterShoreDist[i] = Math.sqrt(md);
+      }
+    }
+    waterGeo.setAttribute('color', new THREE.Float32BufferAttribute(new Float32Array(waterGeo.attributes.position.count * 3), 3));
+    waterMat.vertexColors = true;
+    waterMat.color.set(0xffffff); // albedo comes from the per-vertex colours
+
     // ---- distant ocean + inland mountains (decorative, non-interactive) ----
     // The park lives on a square slab; on its own that block looks like it is
     // floating in empty space. A big sea plane opens the world out to the fog
@@ -781,6 +804,11 @@ export default function Tideline() {
     const tmpV = new THREE.Vector3();
     const sunVec = new THREE.Vector3();
     const moonVec = new THREE.Vector3();
+    // reusable colour scratch for the per-frame water depth/foam shading
+    const wFoam = new THREE.Color(0xffffff);
+    const wDeep = new THREE.Color();
+    const wShallow = new THREE.Color();
+    const wVert = new THREE.Color();
 
     const animate = () => {
       if (!mounted) return;
@@ -788,15 +816,27 @@ export default function Tideline() {
       const dt = Math.min(clock.getDelta(), 0.05);
       const et = clock.elapsedTime;
 
-      // water
+      // water: animate the waves, and shade depth (shallow→deep) + shoreline foam
       const pos = water.geometry.attributes.position;
       const arr = pos.array as Float32Array;
+      const wcol = (water.geometry.attributes.color.array as Float32Array);
+      wShallow.copy(cur.water).lerp(wFoam, 0.32); // bright shallows
+      wDeep.copy(cur.water).multiplyScalar(0.72);  // darker offshore
       for (let i = 0; i < pos.count; i++) {
         const ix = i * 3;
         const x = waterBase[ix], y = waterBase[ix + 1];
         arr[ix + 2] = Math.sin(x * 0.35 + et * 1.1) * 0.16 + Math.cos(y * 0.4 + et * 0.85) * 0.16;
+        const sd = waterShoreDist[i];
+        wVert.copy(wShallow).lerp(wDeep, Math.min(1, sd / 24)); // depth gradient
+        const fb = 1 - Math.min(1, sd / 3.4); // foam band hugging the shore
+        if (fb > 0.001) {
+          const shim = 0.5 + 0.5 * Math.sin(x * 0.9 - y * 0.7 + et * 2.4); // scrolling surf
+          wVert.lerp(wFoam, Math.min(1, fb * fb * (0.45 + 0.75 * shim)) * 0.95);
+        }
+        wcol[ix] = wVert.r; wcol[ix + 1] = wVert.g; wcol[ix + 2] = wVert.b;
       }
       pos.needsUpdate = true;
+      water.geometry.attributes.color.needsUpdate = true;
       water.geometry.computeVertexNormals();
 
       // moving boats
@@ -841,7 +881,7 @@ export default function Tideline() {
       // ---- apply the sampled palette ----
       root.style.background = 'linear-gradient(180deg,' + cur.sky0.getStyle() + ' 0%,' + cur.sky1.getStyle() + ' 76%)';
       hemi.color.copy(cur.hemiSky); hemi.groundColor.copy(cur.hemiGround); hemi.intensity = cur.hemiI;
-      scene.fog!.color.copy(cur.fog); waterMat.color.copy(cur.water);
+      scene.fog!.color.copy(cur.fog); // water tint now comes from per-vertex depth/foam colours
       seaMat.color.copy(cur.water).multiplyScalar(0.82); // deeper offshore water tracks the palette
       lampMats.forEach((m) => (m.emissiveIntensity = cur.lamps * 1.4));
       windowMats.forEach((m) => (m.emissiveIntensity = cur.lamps * 1.1));
