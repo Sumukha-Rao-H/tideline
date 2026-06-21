@@ -395,8 +395,27 @@ export default function Tideline() {
     sea.position.y = 0.22;
     scene.add(sea);
 
-    // Warm stone tone; the day/night fog tints it (tan at dusk, cool by day).
-    const hillMat = new THREE.MeshStandardMaterial({ color: 0x8c8378, roughness: 1, flatShading: true });
+    // Height-based snow caps (handover §6): per-vertex colors run rock→snow with
+    // a soft band so only the tall peaks whiten and there's no hard snow line.
+    // Material color stays white so the vertex colors show through; the day/night
+    // fog still tints everything (tan at dusk, cool by day).
+    const hillMat = new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, roughness: 1, flatShading: true });
+    const ROCK = new THREE.Color(0x6b6760), SNOW = new THREE.Color(0xf4f8fc);
+    const SNOW_Y = 40, SNOW_BAND = 16; // world-height snow line + soft transition width
+    const snowyCone = (w: number, h: number, seg: number, posY: number) => {
+      const g = new THREE.ConeGeometry(w, h, seg, 1);
+      const pos = g.attributes.position;
+      const cc = new Float32Array(pos.count * 3);
+      const tmp = new THREE.Color();
+      for (let i = 0; i < pos.count; i++) {
+        const wy = pos.getY(i) + posY; // this vertex's world height
+        const t = Math.max(0, Math.min(1, (wy - (SNOW_Y - SNOW_BAND)) / SNOW_BAND));
+        tmp.copy(ROCK).lerp(SNOW, t);
+        cc[i * 3] = tmp.r; cc[i * 3 + 1] = tmp.g; cc[i * 3 + 2] = tmp.b;
+      }
+      g.setAttribute('color', new THREE.Float32BufferAttribute(cc, 3));
+      return g;
+    };
     const backdrop = new THREE.Group();
     // Azimuth math: position = (cos a, sin a) * radius, so sin a = +1 (a = π/2)
     // points at the open coast / camera. Leave that front arc clear and pack a
@@ -411,8 +430,9 @@ export default function Tideline() {
       const rad = 195 + Math.random() * 95;
       const w = 32 + Math.random() * 32;
       const h = 52 + Math.random() * 78;
-      const hill = new THREE.Mesh(new THREE.ConeGeometry(w, h, 4 + Math.floor(Math.random() * 4), 1), hillMat);
-      hill.position.set(Math.cos(a) * rad, h / 2 - 8, Math.sin(a) * rad);
+      const posY = h / 2 - 8;
+      const hill = new THREE.Mesh(snowyCone(w, h, 4 + Math.floor(Math.random() * 4), posY), hillMat);
+      hill.position.set(Math.cos(a) * rad, posY, Math.sin(a) * rad);
       hill.rotation.y = Math.random() * TAU;
       backdrop.add(hill);
     }
@@ -467,6 +487,39 @@ export default function Tideline() {
       mound.receiveShadow = true;
       world.add(mound);
     }
+
+    // Conifer forest cloaking the foothills and lower slopes (handover §6): dark
+    // low-poly pines (trunk + two stacked cones) instanced across the inland arc
+    // below the snow line, only where the mainland exists. The three parts share
+    // one instance matrix per tree, so their pre-centred geometries stay aligned.
+    const coniferSpots: Array<[number, number, number]> = [];
+    for (let i = 0; i < 340; i++) {
+      const a = COAST + GAP * 0.8 + Math.random() * (SPAN + GAP * 0.4);
+      const rad = 100 + Math.random() * 100;
+      const x = Math.cos(a) * rad, z = Math.sin(a) * rad;
+      if (inMain(x, z)) coniferSpots.push([x, z, 1.8 + Math.random() * 2.8]);
+    }
+    const C = coniferSpots.length;
+    const pineTrunkMat = new THREE.MeshStandardMaterial({ color: 0x5a4632, roughness: 1, flatShading: true });
+    const pineMat = new THREE.MeshStandardMaterial({ color: 0x36573b, roughness: 0.95, flatShading: true });
+    const pineTrunkG = new THREE.CylinderGeometry(0.1, 0.14, 0.7, 5); pineTrunkG.translate(0, 0.35, 0);
+    const pineLowG = new THREE.ConeGeometry(0.85, 1.7, 7); pineLowG.translate(0, 1.45, 0);
+    const pineHighG = new THREE.ConeGeometry(0.55, 1.4, 7); pineHighG.translate(0, 2.3, 0);
+    const pineTrunks = new THREE.InstancedMesh(pineTrunkG, pineTrunkMat, C);
+    const pineLow = new THREE.InstancedMesh(pineLowG, pineMat, C);
+    const pineHigh = new THREE.InstancedMesh(pineHighG, pineMat, C);
+    const cd = new THREE.Object3D();
+    coniferSpots.forEach((c, i) => {
+      const [x, z, s] = c;
+      cd.position.set(x, 1.08, z);
+      cd.scale.setScalar(s);
+      cd.rotation.set(0, Math.random() * TAU, 0);
+      cd.updateMatrix();
+      pineTrunks.setMatrixAt(i, cd.matrix);
+      pineLow.setMatrixAt(i, cd.matrix);
+      pineHigh.setMatrixAt(i, cd.matrix);
+    });
+    world.add(pineTrunks, pineLow, pineHigh);
 
     // ---- trees (instanced) ----
     const dummy = new THREE.Object3D();
