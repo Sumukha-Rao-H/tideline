@@ -605,6 +605,54 @@ export default function Tideline() {
     lhLight.position.set(27, 6.2, -3);
     world.add(lhLight);
 
+    // ---- lighthouse beam (handover §7, the hero moment) ----
+    // A slim additive cone sweeps a seaward arc from the lamp, with a matching
+    // streak on the water reading as its reflection, plus a real SpotLight that
+    // actually lights the water. All three fade in with the day cycle (dark at
+    // noon, strong at dusk/night) and are carried by the bloom pass.
+    const BEAM_LEN = 44;
+    const beamGeo = new THREE.ConeGeometry(3.0, BEAM_LEN, 18, 1, true);
+    beamGeo.translate(0, -BEAM_LEN / 2, 0); // apex at the pivot (the lamp)
+    const beamColors = new Float32Array(beamGeo.attributes.position.count * 3);
+    {
+      const p = beamGeo.attributes.position.array as Float32Array;
+      for (let i = 0; i < beamGeo.attributes.position.count; i++) {
+        const t = Math.max(0, Math.min(1, 1 + p[i * 3 + 1] / BEAM_LEN)); // 1 at lamp → 0 at tip
+        beamColors[i * 3] = 1.0 * t; beamColors[i * 3 + 1] = 0.82 * t; beamColors[i * 3 + 2] = 0.5 * t;
+      }
+    }
+    beamGeo.setAttribute('color', new THREE.Float32BufferAttribute(beamColors, 3));
+    beamGeo.rotateX(-Math.PI / 2 + 0.14); // swing to horizontal (+Z), tilt down onto the water
+    const beamMat = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0, side: THREE.DoubleSide });
+    const beamPivot = new THREE.Group();
+    beamPivot.position.set(27, 6.15, -3);
+    beamPivot.add(new THREE.Mesh(beamGeo, beamMat));
+    world.add(beamPivot);
+
+    const streakGeo = new THREE.PlaneGeometry(2.6, 40, 1, 1);
+    streakGeo.rotateX(-Math.PI / 2);
+    streakGeo.translate(0, 0, 20); // runs +Z out from the lighthouse base
+    const streakColors = new Float32Array(streakGeo.attributes.position.count * 3);
+    {
+      const p = streakGeo.attributes.position.array as Float32Array;
+      for (let i = 0; i < streakGeo.attributes.position.count; i++) {
+        const t = Math.max(0, Math.min(1, 1 - p[i * 3 + 2] / 40)); // bright at base → fades seaward
+        streakColors[i * 3] = 1.0 * t; streakColors[i * 3 + 1] = 0.8 * t; streakColors[i * 3 + 2] = 0.46 * t;
+      }
+    }
+    streakGeo.setAttribute('color', new THREE.Float32BufferAttribute(streakColors, 3));
+    const streakMat = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false, opacity: 0 });
+    const streakPivot = new THREE.Group();
+    streakPivot.position.set(27, 0.66, -3);
+    streakPivot.add(new THREE.Mesh(streakGeo, streakMat));
+    world.add(streakPivot);
+
+    const lhSpot = new THREE.SpotLight(0xffd9a0, 0, 52, 0.15, 0.7, 1);
+    const lhSpotTarget = new THREE.Object3D();
+    lhSpotTarget.position.set(0, -5.5, 40); // out and down along the beam
+    beamPivot.add(lhSpot, lhSpotTarget);
+    lhSpot.target = lhSpotTarget;
+
     // ---- pavilion ----
     const pav = new THREE.Group();
     const deck = new THREE.Mesh(new THREE.CylinderGeometry(2.6, 2.6, 0.25, 8), new THREE.MeshStandardMaterial({ color: 0xb89a6e, roughness: 1 }));
@@ -747,6 +795,13 @@ export default function Tideline() {
       glowSprites.forEach((m) => (m.opacity = cur.lamps * 0.9));
       starMat.opacity = cur.stars;
       lhLight.intensity = cur.lamps * 2.2;
+      // sweep the lighthouse beam across the bay and fade it with the day cycle
+      const beamSweep = 0.3 + Math.sin(et * 0.3) * 0.7;
+      beamPivot.rotation.y = beamSweep;
+      streakPivot.rotation.y = beamSweep;
+      beamMat.opacity = cur.lamps * 0.7;
+      streakMat.opacity = cur.lamps * 0.85;
+      lhSpot.intensity = cur.lamps * 2.2;
       sunSprite.position.copy(sunVec).multiplyScalar(320);
       sunSprite.material.color.copy(cur.keyCol);
       sunSprite.material.opacity = cur.sunGlow;

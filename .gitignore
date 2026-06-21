@@ -8,3 +8,6 @@ npm-debug.log*
 .env*.local
 next-env.d.ts
 *.tsbuildinfo
+
+# local screenshot/verify artifacts
+.playwright-cli/
