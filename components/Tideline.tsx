@@ -532,6 +532,7 @@ export default function Tideline() {
     const pineLow = new THREE.InstancedMesh(pineLowG, pineMat, C);
     const pineHigh = new THREE.InstancedMesh(pineHighG, pineMat, C);
     const cd = new THREE.Object3D();
+    const pineTint = new THREE.Color();
     coniferSpots.forEach((c, i) => {
       const [x, z, s] = c;
       cd.position.set(x, 1.08, z);
@@ -541,7 +542,13 @@ export default function Tideline() {
       pineTrunks.setMatrixAt(i, cd.matrix);
       pineLow.setMatrixAt(i, cd.matrix);
       pineHigh.setMatrixAt(i, cd.matrix);
+      const v = 0.78 + Math.random() * 0.42; // darker/lighter pine variation
+      pineTint.setRGB(v * 0.95, v, v * 0.9);
+      pineLow.setColorAt(i, pineTint);
+      pineHigh.setColorAt(i, pineTint);
     });
+    if (pineLow.instanceColor) pineLow.instanceColor.needsUpdate = true;
+    if (pineHigh.instanceColor) pineHigh.instanceColor.needsUpdate = true;
     world.add(pineTrunks, pineLow, pineHigh);
 
     // ---- trees (instanced) ----
@@ -570,12 +577,22 @@ export default function Tideline() {
     const fol1 = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(0.62, 0), folA, N);
     const fol2 = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(0.46, 0), folB, N);
     trunks.castShadow = fol1.castShadow = fol2.castShadow = true;
+    // Per-instance foliage tint (handover §8) — multiplies the base green by a
+    // brightness/hue jitter (warmer-yellow ↔ cooler) so the canopy reads with
+    // depth and variation instead of two flat greens.
+    const folTint = new THREE.Color();
     treeSpots.forEach((t, i) => {
       const [x, z, s] = t;
       dummy.position.set(x, 1.1 + 0.5 * s, z); dummy.scale.set(s, s * 1.3, s); dummy.rotation.set(0, 0, 0); dummy.updateMatrix(); trunks.setMatrixAt(i, dummy.matrix);
       dummy.position.set(x, 1.1 + 1.05 * s, z); dummy.scale.set(s, s, s); dummy.rotation.set(0, Math.random() * 3, 0); dummy.updateMatrix(); fol1.setMatrixAt(i, dummy.matrix);
       dummy.position.set(x, 1.1 + 1.55 * s, z); dummy.scale.set(s, s, s); dummy.rotation.set(0, Math.random() * 3, 0); dummy.updateMatrix(); fol2.setMatrixAt(i, dummy.matrix);
+      const v = 0.8 + Math.random() * 0.4;
+      folTint.setRGB(v * (0.96 + Math.random() * 0.12), v, v * (0.88 + Math.random() * 0.08));
+      fol1.setColorAt(i, folTint);
+      fol2.setColorAt(i, folTint);
     });
+    if (fol1.instanceColor) fol1.instanceColor.needsUpdate = true;
+    if (fol2.instanceColor) fol2.instanceColor.needsUpdate = true;
     world.add(trunks, fol1, fol2);
 
     // ---- rocks / breakwater ----
@@ -594,6 +611,23 @@ export default function Tideline() {
       dummy.position.set(x, 0.55, z); dummy.scale.set(s * 1.3, s, s * 1.1); dummy.rotation.set(Math.random(), Math.random() * 3, Math.random()); dummy.updateMatrix(); rocks.setMatrixAt(i, dummy.matrix);
     });
     world.add(rocks);
+
+    // Scattered rocks along the park's coastline (handover §8): sit them at the
+    // waterline on the wavy seaward shore only (shape y < 6), half-submerged, so
+    // the foam breaks around them. Skips the inland back edge (under the mainland).
+    const shoreRockSpots: Array<[number, number, number]> = [];
+    for (const p of shape.getPoints(170)) {
+      if (p.y > 6 || Math.random() > 0.2) continue;
+      shoreRockSpots.push([p.x + (Math.random() - 0.5) * 1.6, -p.y + (Math.random() - 0.5) * 1.6, 0.32 + Math.random() * 0.6]);
+    }
+    const shoreRocks = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(1, 0), rockMat, shoreRockSpots.length);
+    shoreRocks.castShadow = true;
+    shoreRocks.receiveShadow = true;
+    shoreRockSpots.forEach((r, i) => {
+      const [x, z, s] = r;
+      dummy.position.set(x, 0.6, z); dummy.scale.set(s * 1.25, s * 0.8, s * 1.1); dummy.rotation.set(Math.random(), Math.random() * 3, Math.random()); dummy.updateMatrix(); shoreRocks.setMatrixAt(i, dummy.matrix);
+    });
+    world.add(shoreRocks);
 
     // ---- promenade path ----
     const pathMat = new THREE.MeshStandardMaterial({ color: 0xcabb98, roughness: 1 });
