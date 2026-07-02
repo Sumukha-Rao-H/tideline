@@ -1,4 +1,4 @@
-export type HotspotKey = 'marina' | 'lighthouse' | 'promenade' | 'grove';
+export type HotspotKey = 'marina' | 'lighthouse' | 'promenade' | 'grove' | 'falls';
 
 export interface Hotspot {
   key: HotspotKey;
@@ -12,4 +12,5 @@ export const HOTSPOTS: Hotspot[] = [
   { key: 'lighthouse', name: 'Lighthouse Point', sub: 'Coastal lookout trail', letter: 'L' },
   { key: 'promenade', name: 'The Promenade', sub: 'Waterfront walk', letter: 'P' },
   { key: 'grove', name: 'Cedar Grove', sub: 'Picnic lawns & pavilion', letter: 'C' },
+  { key: 'falls', name: 'Cascade Falls', sub: 'Waterfall & alpine lake', letter: 'F' },
 ];

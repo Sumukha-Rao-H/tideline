@@ -6,6 +6,7 @@ import { AUTO_DAY_SPEED, DAY_STOPS, easeInOut, sampleDay, sunDirAt, type DayStat
 import type { HotspotKey } from '@/lib/hotspots';
 import type { Sky } from './sky';
 import type { Ocean } from './ocean';
+import type { River } from './river';
 import type { Lighthouse } from './lighthouse';
 import type { CamTween, SceneRegistry } from './types';
 
@@ -18,6 +19,7 @@ export interface AnimateDeps {
   composer: EffectComposer;
   sky: Sky;
   ocean: Ocean;
+  river: River;
   lighthouse: Lighthouse;
   reg: SceneRegistry;
   anchors: Record<HotspotKey, THREE.Vector3>;
@@ -35,7 +37,7 @@ export interface AnimateDeps {
 // The per-frame loop: ocean swell, boat drift, the day/night clock, palette
 // application, camera tweens and hotspot projection. Returns a stop function.
 export const startAnimateLoop = (d: AnimateDeps): (() => void) => {
-  const { root, mount, scene, camera, controls, composer, sky, reg, cur } = d;
+  const { root, mount, scene, camera, controls, composer, sky, reg, cur, river } = d;
   const { ocean, oceanUniforms, waterBase } = d.ocean;
   const { beamPivot, streakPivot, beamMat, streakMat, lhLight, lhSpot } = d.lighthouse;
   const { hemi, sun, starMat, sunSprite, moonSprite } = sky;
@@ -63,6 +65,21 @@ export const startAnimateLoop = (d: AnimateDeps): (() => void) => {
     oceanUniforms.uTime.value = et;
     oceanUniforms.uShallow.value.copy(cur.water).lerp(wWhite, 0.25);
     oceanUniforms.uDeep.value.copy(cur.water).multiplyScalar(0.7);
+
+    // river + lake water — same rippling treatment as the ocean
+    for (const rw of river.riverWaters) {
+      const pos = rw.mesh.geometry.attributes.position as THREE.BufferAttribute;
+      const arr = pos.array as Float32Array, b = rw.base;
+      for (let i = 0; i < pos.count; i++) { const ix = i * 3; arr[ix + 1] = b[ix + 1] + (Math.sin(b[ix] * 0.18 + et * 1.4) + Math.cos(b[ix + 2] * 0.22 + et * 1.1)) * 0.5 * rw.amp; }
+      pos.needsUpdate = true;
+      if (rw.lit) rw.mesh.geometry.computeVertexNormals();
+    }
+
+    // river flow streaks + waterfall foam + mist spray
+    river.flowTex.offset.y -= dt * 0.45;
+    river.fallTex.offset.y -= dt * 1.7;
+    river.spray.forEach((m, i) => (m.opacity = 0.24 + 0.12 * Math.sin(et * 3 + i * 1.7)));
+    river.riverMats.forEach((m) => m.color.copy(cur.water).lerp(river.riverTint, 0.12));
 
     // moving boats
     reg.movingBoats.forEach((b) => {

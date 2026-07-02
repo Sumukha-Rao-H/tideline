@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { sampleHeight, shoreZ } from '@/lib/terrainField';
+import { nearRiver, sampleHeight, shoreZ } from '@/lib/terrainField';
 import type { SceneCtx } from './types';
 
 // ===================== BEACH PROPS (shacks, lifeguard towers, benches, umbrellas) =====================
@@ -13,8 +13,9 @@ export const createBeachProps = (ctx: SceneCtx) => {
     for (let d = 0; d < 34; d += 1) { const z = sz - d; const y = sampleHeight(x, z); if (y > rise) return new THREE.Vector3(x, y, z); }
     const z = sz - 8; return new THREE.Vector3(x, sampleHeight(x, z), z);
   };
-  // Skip the marina pier (x≈-36) and lighthouse point (x≈70).
-  const occupied = (x: number) => Math.abs(x + 36) < 9 || Math.abs(x - 70) < 8;
+  // Skip the marina pier (x≈-36), lighthouse point (x≈70) and the river delta
+  // cutting across the sand (its centre wanders around x≈8–14 near the shore).
+  const occupied = (x: number) => Math.abs(x + 36) < 9 || Math.abs(x - 70) < 8 || nearRiver(x, shoreZ(x) - 10);
 
   const mkLifeguard = (p: THREE.Vector3) => {
     const g = new THREE.Group();

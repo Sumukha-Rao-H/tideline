@@ -34,6 +34,89 @@ const landHeight = (x: number, z: number) => {
   return h;
 };
 
+// ===================== RIVER + LAKE (Cascade Falls) =====================
+// Source in the mountains -> waterfall -> alpine lake -> river -> sea. The
+// centreline wanders with z; the carve below only ever lowers the land.
+export const riverCenterX = (z: number) => 6 * Math.sin((z + 30) * 0.016) + 4 * Math.sin((z + 120) * 0.006) + 3;
+
+// river/lake stations (z increases toward the sea). RIVER_SEA reaches past the
+// wide sand band so the delta channel actually meets the ocean.
+export const FALLS_TOP = -100;
+export const FALLS_BOT = -88;
+export const LAKE_OUT = -56;
+export const RIVER_SEA = 52;
+const DELTA_Z = 20; // where the mouth starts fanning across the beach
+
+export const LAKE_CZ = -72;
+export const LAKE_CX = riverCenterX(LAKE_CZ);
+export const LAKE_R = 20;
+export const lakeRad = (a: number) => LAKE_R * (0.82 + 0.26 * Math.sin(a * 3 + 1) + 0.14 * Math.sin(a * 5));
+// <1 = inside the irregular lake (wider across the valley than along it)
+export const lakeShape = (x: number, z: number) => {
+  const a = Math.atan2(z - LAKE_CZ, x - LAKE_CX);
+  return Math.hypot(x - LAKE_CX, (z - LAKE_CZ) * 0.92) / lakeRad(a);
+};
+// lake sits at the natural grade of its outlet spillway
+export const LAKE_Y = landHeight(riverCenterX(LAKE_OUT), LAKE_OUT) - 0.6;
+
+export const riverHalfW = (z: number) => {
+  if (z <= FALLS_BOT && z > FALLS_TOP - 2) return 5.0;  // broad waterfall face
+  if (z > FALLS_BOT && z < LAKE_OUT) return 5.5;        // through the lake (mostly hidden by the lake mesh)
+  let w = 2.4;
+  if (z > LAKE_OUT) w = 2.8 + (z - LAKE_OUT) * 0.012;
+  if (z > DELTA_Z) w += (z - DELTA_Z) * 0.2;            // fan into a delta at the mouth
+  return w;
+};
+
+// Strictly-downhill water profile = running minimum of the NATURAL ground along
+// the centreline (toward the sea, z increases). This never raises land; the
+// channel just gets cut deeper where the ground dips below the water line.
+const _pz0 = -150, _pz1 = RIVER_SEA, _pn = 190;
+const _prof: number[] = [];
+{ let run = Infinity; for (let i = 0; i <= _pn; i++) { const z = _pz0 + (_pz1 - _pz0) * i / _pn; run = Math.min(run, landHeight(riverCenterX(z), z)); _prof.push(run); } }
+const profAt = (z: number) => {
+  if (z <= _pz0) return _prof[0];
+  if (z >= _pz1) return _prof[_pn];
+  const f = (z - _pz0) / (_pz1 - _pz0) * _pn, i = Math.floor(f), t = f - i;
+  return _prof[i] * (1 - t) + _prof[i + 1] * t;
+};
+
+// Unified water surface: mountain stream -> waterfall -> flat lake -> outlet
+// river -> sea (each segment hands off at the same height).
+export const wlev = (z: number) => {
+  if (z <= FALLS_TOP) return Math.max(profAt(z), LAKE_Y);                     // mountain stream on the natural grade
+  if (z <= FALLS_BOT) return LAKE_Y + (Math.max(profAt(FALLS_TOP), LAKE_Y) - LAKE_Y) * ((FALLS_BOT - z) / (FALLS_BOT - FALLS_TOP)); // waterfall drop
+  if (z <= LAKE_OUT) return LAKE_Y;                                           // flat lake
+  const tt = (z - LAKE_OUT) / (14 - LAKE_OUT);                                // outlet drops to sea level, then tucks under the ocean
+  return Math.max(LAKE_Y * (1 - tt), -0.3);
+};
+
+const carveRiver = (x: number, z: number, h: number) => {
+  let out = h;
+  // lake basin shaped as a BOWL: deep in the middle, rising to the waterline
+  // at the shore (no floating rim)
+  const lf = lakeShape(x, z);
+  if (lf < 1.2) { const dep = Math.max(0, 1 - lf); const target = LAKE_Y - 4.6 * dep; const blend = sstep(1.2, 0.9, lf); out = Math.min(out, out * (1 - blend) + target * blend); }
+  // narrow channel: mountain stream, waterfall, outlet river (only ever cut
+  // down; shallow delta at the mouth)
+  if (z >= FALLS_TOP - 4 && z <= RIVER_SEA + 6) {
+    const cx = riverCenterX(z), d = Math.abs(x - cx), hw = riverHalfW(z), outer = hw + 9;
+    if (d <= outer) {
+      const deep = (z > FALLS_BOT && z < LAKE_OUT) ? 5 : (z > DELTA_Z ? 0.5 : 1.3);
+      const floor = wlev(z) - deep;
+      const blend = sstep(outer, hw, d);
+      out = Math.min(out, out * (1 - blend) + floor * blend);
+    }
+  }
+  return out;
+};
+
+export const nearRiver = (x: number, z: number) => {
+  if (lakeShape(x, z) < 1.25) return true;
+  if (z < FALLS_TOP - 2 || z > RIVER_SEA + 2) return false;
+  return Math.abs(x - riverCenterX(z)) < riverHalfW(z) + 4.5;
+};
+
 // Long sandy beach: inland land ramps gently down across a wide sand flat to
 // the waterline (a real beach, not a cliff), then a shallow underwater slope
 // runs out to the deep seabed. BEACH widens/narrows the dry sand band.
@@ -43,8 +126,8 @@ const WLINE = -0.35; // sand height at the waterline (just under the ocean surfa
 
 export const sampleHeight = (x: number, z: number) => {
   const o = oceanField(x, z);
-  if (o <= -BEACH) return landHeight(x, z);                                   // inland
-  if (o < 0) { const tb = sstep(-BEACH, 0, o); return lerp(Math.max(landHeight(x, z), 1.6), WLINE, tb); } // dry sand
+  if (o <= -BEACH) return carveRiver(x, z, landHeight(x, z));                  // inland
+  if (o < 0) { const tb = sstep(-BEACH, 0, o); return carveRiver(x, z, lerp(Math.max(landHeight(x, z), 1.6), WLINE, tb)); } // dry sand (the delta cuts through)
   const td = sstep(0, SEAW, o); return lerp(WLINE, -13, td);                  // submerged slope
 };
 

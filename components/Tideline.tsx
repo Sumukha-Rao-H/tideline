@@ -11,6 +11,7 @@ import { createSky } from '@/scene/sky';
 import { createSharedMats } from '@/scene/materials';
 import { createTerrain } from '@/scene/terrain';
 import { createOcean } from '@/scene/ocean';
+import { createRiver } from '@/scene/river';
 import { createVegetation } from '@/scene/vegetation';
 import { createStructures } from '@/scene/structures';
 import { createLighthouse } from '@/scene/lighthouse';
@@ -96,6 +97,7 @@ export default function Tideline() {
     createVegetation(ctx);
     const structures = createStructures(ctx);
     const lighthouse = createLighthouse(ctx);
+    const river = createRiver(ctx, cur);
     createBeachProps(ctx);
 
     // ---- hotspot anchors ----
@@ -104,6 +106,7 @@ export default function Tideline() {
       lighthouse: new THREE.Vector3(70, 9, lighthouse.lz),
       promenade: new THREE.Vector3(12, sampleHeight(12, shoreZ(12) - 5) + 3, shoreZ(12) - 5),
       grove: new THREE.Vector3(structures.grove.gx, structures.grove.gy + 4.6, structures.grove.gz),
+      falls: river.fallsAnchor.clone(),
     };
     anchorsRef.current = anchors;
 
@@ -138,7 +141,7 @@ export default function Tideline() {
 
     const stopLoop = startAnimateLoop({
       root, mount, scene, camera, controls, composer,
-      sky, ocean, lighthouse, reg, anchors, cur,
+      sky, ocean, river, lighthouse, reg, anchors, cur,
       dayRef, dayTargetRef, autoRef, timeIdxRef, tweenRef, focusTargetRef,
       setTimeIdx,
     });

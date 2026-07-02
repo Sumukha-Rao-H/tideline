@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { backZ, sampleHeight, shoreZ } from '@/lib/terrainField';
+import { backZ, nearRiver, sampleHeight, shoreZ } from '@/lib/terrainField';
 import type { SceneCtx } from './types';
 
 export interface Structures {
@@ -130,6 +130,7 @@ export const createStructures = (ctx: SceneCtx): Structures => {
     const h = sampleHeight(x, z); if (h < 1.4 || h > 17) continue;
     const sl = Math.abs(sampleHeight(x + 2, z) - sampleHeight(x - 2, z)) + Math.abs(sampleHeight(x, z + 2) - sampleHeight(x, z - 2));
     if (sl > 4.5) continue;
+    if (nearRiver(x, z)) continue;
     if (onRoad(x, z, bz)) continue;
     if (houseSpots.some((s) => Math.hypot(s[0] - x, s[1] - z) < 8.2)) continue;
     houseSpots.push([x, z, h]);

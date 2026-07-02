@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { oceanField, sampleHeight } from '@/lib/terrainField';
+import { nearRiver, oceanField, sampleHeight } from '@/lib/terrainField';
 import type { SceneCtx } from './types';
 
 // ---- trees (instanced conifers) + rocks (scattered inland) ----
@@ -15,6 +15,7 @@ export const createVegetation = (ctx: SceneCtx) => {
     const h = sampleHeight(x, z); if (h < 1.6 || h > 34) continue;
     const sl = Math.abs(sampleHeight(x + 2, z) - sampleHeight(x - 2, z)) + Math.abs(sampleHeight(x, z + 2) - sampleHeight(x, z - 2));
     if (sl > 5.5) continue;
+    if (nearRiver(x, z)) continue;
     treeSpots.push([x, h, z, 0.8 + rng() * 1.15]);
   }
   const Nt = treeSpots.length;
@@ -43,6 +44,7 @@ export const createVegetation = (ctx: SceneCtx) => {
   const rockSpots: Array<[number, number, number, number]> = [];
   for (let i = 0; i < 2600 && rockSpots.length < 150; i++) {
     const x = (rng() - 0.5) * 500, z = -70 + rng() * 250; const o = oceanField(x, z);
+    if (nearRiver(x, z)) continue;
     if (o < -28) { const h = sampleHeight(x, z); if (h > 2 && h < 28 && rng() < 0.05) rockSpots.push([x, h, z, 0.4 + rng() * 0.9]); }
   }
   const rocks = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(1, 0), ctx.mats.rockMat, rockSpots.length);
